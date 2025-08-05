@@ -1,4 +1,3 @@
-
 const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -9,63 +8,52 @@ const port = 3000;
 
 app.use(express.json());
 
+// 공통 JSON 파일 로드 및 저장 함수
+function loadJSON(filePath, defaultValue = {}) {
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    } else {
+      fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2), "utf-8");
+      return defaultValue;
+    }
+  } catch (err) {
+    console.error(`${filePath} 읽기 실패`, err);
+    return defaultValue;
+  }
+}
+
+function saveJSON(filePath, data) {
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    console.error(`${filePath} 저장 실패`, err);
+  }
+}
+
+// 경로 정의
 const basePricesPath = path.join(__dirname, "basePrices.json");
 const moneyFilePath = path.join(__dirname, "money.json");
+const soldAmountsPath = path.join(__dirname, "soldAmounts.json");
 
-// 기본 basePrices 값
+// 기본 basePrices
 const defaultBasePrices = {
   wheat: 100,
   carrot: 80,
   potato: 90
 };
 
-// basePrices.json 로드 또는 생성
-let basePrices;
-if (fs.existsSync(basePricesPath)) {
-  try {
-    const data = fs.readFileSync(basePricesPath, "utf-8");
-    basePrices = JSON.parse(data);
-    console.log("✅ basePrices.json 로드 완료");
-  } catch (err) {
-    console.error("❌ basePrices.json 읽기 실패", err);
-    basePrices = defaultBasePrices;
-    fs.writeFileSync(basePricesPath, JSON.stringify(basePrices, null, 2), "utf-8");
-    console.log("📝 basePrices.json 기본값으로 생성됨");
-  }
-} else {
-  basePrices = defaultBasePrices;
-  fs.writeFileSync(basePricesPath, JSON.stringify(basePrices, null, 2), "utf-8");
-  console.log("📝 basePrices.json 파일 생성됨");
-}
+// 데이터 로드
+const basePrices = loadJSON(basePricesPath, defaultBasePrices);
+let balances = loadJSON(moneyFilePath, {});
+let soldAmounts = loadJSON(soldAmountsPath, {});
 
-// money.json 로드 또는 생성
-function loadBalances() {
-  try {
-    if (fs.existsSync(moneyFilePath)) {
-      const data = fs.readFileSync(moneyFilePath, "utf-8");
-      return JSON.parse(data);
-    } else {
-      fs.writeFileSync(moneyFilePath, JSON.stringify({}, null, 2), "utf-8");
-      console.log("📝 money.json 파일 생성됨");
-      return {};
-    }
-  } catch (err) {
-    console.error("money.json 로드 실패", err);
-    return {};
-  }
-}
+// RSA 키 경로 및 생성
+const keyDir = path.join(__dirname, "keys");
+if (!fs.existsSync(keyDir)) fs.mkdirSync(keyDir);
 
-function saveBalances(balances) {
-  try {
-    fs.writeFileSync(moneyFilePath, JSON.stringify(balances, null, 2), "utf-8");
-  } catch (err) {
-    console.error("money.json 저장 실패", err);
-  }
-}
-
-// RSA 키 생성
-const privateKeyPath = "./private_key.pem";
-const publicKeyPath = "./public_key.pem";
+const privateKeyPath = path.join(keyDir, "private_key.pem");
+const publicKeyPath = path.join(keyDir, "public_key.pem");
 
 if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath)) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
@@ -74,7 +62,10 @@ if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath)) {
 
   fs.writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs1", format: "pem" }));
   fs.writeFileSync(publicKeyPath, publicKey.export({ type: "pkcs1", format: "pem" }));
-  console.log("🔐 RSA 키 쌍 생성됨");
+
+  fs.chmodSync(privateKeyPath, 0o600);
+  fs.chmodSync(publicKeyPath, 0o644);
+  console.log("🔐 RSA 키 쌍 생성됨 (보안 권한 적용됨)");
 }
 
 const publicKey = fs.readFileSync(publicKeyPath, "utf-8");
@@ -83,7 +74,6 @@ const publicKey = fs.readFileSync(publicKeyPath, "utf-8");
 let previousPrices = {};
 let encryptedPrices = {};
 let plainPrices = {};
-let soldAmounts = {};  // 아이템별 판매 수량
 
 function getRandomPrice(base) {
   const maxIncrease = base * 0.3;
@@ -104,12 +94,11 @@ function encryptPrice(price) {
 function updatePrices() {
   encryptedPrices = {};
   plainPrices = {};
-  soldAmounts = {};  // 시세 변동 시 판매량 초기화
+  soldAmounts = {}; // 초기화 (가격 새로 설정)
 
   for (let item in basePrices) {
     const base = basePrices[item];
     const price = getRandomPrice(base);
-
     const prevPrice = previousPrices[item] || base;
     const rate = ((price - base) / base) * 100;
     const change = price - prevPrice;
@@ -125,17 +114,24 @@ function updatePrices() {
       previousPrice: prevPrice
     };
 
-    soldAmounts[item] = 0;  // 초기화
+    soldAmounts[item] = soldAmounts[item] || 0;
 
     console.log(`${item}: 현재가 ${price}G (기준가 ${base}G) 변화량 ${change}G`);
   }
 
-  console.log("✅ 시세 갱신 완료
-");
+  console.log("✅ 시세 갱신 완료\n");
 }
 
-// 사용자 잔액
-let balances = loadBalances();
+// 판매량 저장/감소 주기적 처리
+function saveSoldAmounts() {
+  saveJSON(soldAmountsPath, soldAmounts);
+}
+
+function decaySoldAmounts() {
+  for (let item in soldAmounts) {
+    soldAmounts[item] = Math.max(0, soldAmounts[item] - 1); // 점진 감소
+  }
+}
 
 // 판매 API
 app.post("/sell", (req, res) => {
@@ -144,21 +140,23 @@ app.post("/sell", (req, res) => {
   if (!userId || !item || !amount) {
     return res.status(400).json({ error: "Invalid sell data" });
   }
+
   if (!plainPrices[item]) {
     return res.status(400).json({ error: "Invalid item" });
   }
+
   if (amount <= 0 || amount > 64) {
     return res.status(400).json({ error: "Amount must be between 1 and 64" });
   }
 
   let price = plainPrices[item];
   const base = basePrices[item];
+
   soldAmounts[item] = (soldAmounts[item] || 0) + amount;
 
   const dropRatio = soldAmounts[item] * 0.004; // 0.4% per item
   let newPrice = price * (1 - dropRatio);
-
-  newPrice = Math.max(newPrice, 65); // 최소 가격 65 보장
+  newPrice = Math.max(newPrice, 65);
 
   const taxedUnitPrice = newPrice;
   const totalGain = taxedUnitPrice * amount;
@@ -181,7 +179,8 @@ app.post("/sell", (req, res) => {
   balances[userId].balance += totalGain;
   balances[userId].sold[item] = (balances[userId].sold[item] || 0) + amount;
 
-  saveBalances(balances);
+  saveJSON(moneyFilePath, balances);
+  saveSoldAmounts();
 
   res.json({
     item,
@@ -194,6 +193,7 @@ app.post("/sell", (req, res) => {
   });
 });
 
+// API 라우터
 app.get("/prices", (req, res) => {
   res.json(encryptedPrices);
 });
@@ -214,8 +214,11 @@ app.get("/user/:userId", (req, res) => {
   res.json(balances[userId]);
 });
 
+// 서버 시작
 app.listen(port, () => {
   console.log(`✅ 서버 실행 중: http://localhost:${port}`);
   updatePrices();
-  setInterval(updatePrices, 30 * 1000);
+  setInterval(updatePrices, 30 * 1000); // 30초마다 시세 갱신
+  setInterval(saveSoldAmounts, 30 * 1000); // 판매량 저장
+  setInterval(decaySoldAmounts, 60 * 1000); // 판매량 감소
 });
